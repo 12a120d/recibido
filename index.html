@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="es-MX">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#f4f5f5">
+<title>Acceso</title>
+<style>
+  :root {
+    --tinta: #1f2a27;
+    --pizarra: #6b7572;
+    --linea: #dfe3e1;
+    --papel: #ffffff;
+    --fondo: #f4f5f5;
+    --acento: #33403c;
+    --error: #a23a3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px 16px;
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--tinta);
+    background: var(--fondo);
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    width: 100%;
+    max-width: 340px;
+    background: var(--papel);
+    border: 1px solid var(--linea);
+    border-radius: 10px;
+    padding: 28px 26px 22px;
+  }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .sub { margin: 0 0 20px; font-size: 13px; color: var(--pizarra); }
+  form { display: grid; gap: 14px; }
+  label { display: grid; gap: 5px; font-size: 12.5px; color: var(--pizarra); }
+  input {
+    font: inherit; color: var(--tinta);
+    padding: 9px 11px;
+    border-radius: 6px;
+    border: 1px solid var(--linea);
+    background: var(--papel);
+  }
+  input:focus { outline: none; border-color: var(--acento); }
+  button {
+    margin-top: 4px;
+    font: inherit; font-weight: 500; font-size: 14px;
+    padding: 10px;
+    border: 0; border-radius: 6px;
+    color: #fff;
+    background: var(--acento);
+    cursor: pointer;
+  }
+  button:hover { background: #26302d; }
+  button:disabled { opacity: .6; cursor: progress; }
+  #msg { font-size: 12.5px; min-height: 16px; color: var(--error); }
+  .foot { margin-top: 6px; font-size: 11px; color: var(--pizarra); text-align: center; }
+</style>
+</head>
+<body>
+
+  <form class="card" id="login" autocomplete="off">
+    <h1>Acceso restringido</h1>
+    <p class="sub">Introduce tus credenciales para abrir el documento.</p>
+
+    <label>Usuario
+      <input id="user" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    </label>
+    <label>Contraseña
+      <input id="pass" type="password" required>
+    </label>
+    <button id="submit" type="submit">Entrar</button>
+    <div id="msg" role="status" aria-live="polite"></div>
+
+    <div class="foot">El contenido se descifra en tu navegador.</div>
+  </form>
+
+<script>
+const MAGIC = "ENC1";        // must match encrypt.py
+const SALT_LEN = 16;
+const IV_LEN = 12;
+
+const $ = (id) => document.getElementById(id);
+const enc = new TextEncoder();
+
+// Parse the packed file: MAGIC(4) | iterations(4, BE) | salt(16) | iv(12) | ciphertext
+function parseEnc(buf) {
+  const view = new DataView(buf);
+  const magic = new TextDecoder().decode(new Uint8Array(buf, 0, 4));
+  if (magic !== MAGIC) throw new Error("El archivo secret.enc no tiene el formato esperado.");
+  let off = 4;
+  const iterations = view.getUint32(off, false); off += 4;
+  const salt = new Uint8Array(buf, off, SALT_LEN); off += SALT_LEN;
+  const iv = new Uint8Array(buf, off, IV_LEN); off += IV_LEN;
+  const ciphertext = new Uint8Array(buf, off);
+  return { iterations, salt, iv, ciphertext };
+}
+
+// Derive the AES-GCM key from (username + password) via PBKDF2 — mirrors Python.
+async function deriveKey(username, password, salt, iterations) {
+  const baseKey = await crypto.subtle.importKey(
+    "raw", enc.encode(username + password), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"]
+  );
+}
+
+// Swap the login UI for the decrypted document.
+function render(html) {
+  document.open();
+  document.write(html);
+  document.close();
+}
+
+async function loadEnc() {
+  const res = await fetch("secret.enc", { cache: "no-store" });
+  if (!res.ok) throw new Error(`No se pudo cargar secret.enc (${res.status}).`);
+  return res.arrayBuffer();
+}
+
+$("login").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = $("msg");
+  const btn = $("submit");
+  msg.textContent = "";
+  btn.disabled = true;
+
+  try {
+    const buf = await loadEnc();
+    const { iterations, salt, iv, ciphertext } = parseEnc(buf);
+    const key = await deriveKey($("user").value, $("pass").value, salt, iterations);
+
+    let plainBuf;
+    try {
+      plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+    } catch {
+      throw new Error("Usuario o contraseña incorrectos.");
+    }
+
+    render(new TextDecoder().decode(plainBuf));
+  } catch (err) {
+    msg.textContent = err.message;
+    btn.disabled = false;
+    $("pass").value = "";
+  }
+});
+</script>
+</body>
+</html>
